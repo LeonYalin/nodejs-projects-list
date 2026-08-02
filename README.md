@@ -4,15 +4,17 @@ This repo contains a list of nodejs projects that should be done in order to bec
 # Phase 1: High-Performance Data Layers & Messaging
 
 ### 1. Enterprise Log ETL & Reporting Pipeline (Kafka + ClickHouse)
-*   **The Goal:** Master high-throughput data ingestion, streaming transformations, and analytical write-optimization without blocking the event loop.
+*   **Repo:** ✅ [nodejs-enterprise-log-etl-and-reporting-pipeline-project](https://github.com/LeonYalin/nodejs-enterprise-log-etl-and-reporting-pipeline-project)
+*   **The Goal:** Master high-throughput data ingestion, batched transformations, and analytical write-optimization without blocking the event loop.
 *   **Production Challenge:** Handling millions of real-time server records and performing instant aggregations without overwhelming relational databases or filling up Node memory.
 *   **Tech Stack & Libraries:**
-    *   *Broker/Database:* Apache Kafka, ClickHouse (Columnar analytical database).
-    *   *Node Libraries:* `kafkajs` (industry-standard Kafka client), `@clickhouse/client` (official ClickHouse driver).
+    *   *Broker/Database:* Apache Kafka (KRaft mode), ClickHouse (Columnar analytical database).
+    *   *Node Libraries:* `kafkajs` (industry-standard Kafka client), `@clickhouse/client` (official ClickHouse driver), `zod` (runtime validation), `express` (reporting API).
 *   **Local Setup & Simulation Plan:**
     *   Spin up Kafka and ClickHouse containers via Docker.
     *   Write a background script acting as a high-frequency Kafka Producer that blasts 10,000 mock log rows/sec into a topic.
-    *   Your main Node application consumes messages in batches, transforms the shapes using streams, and executes optimized bulk column-inserts into ClickHouse.
+    *   Your main Node application consumes messages in batches (`eachBatch`), validates them (invalid → Dead Letter Queue), buffers rows in memory, and executes optimized bulk column-inserts into ClickHouse — committing Kafka offsets only after a successful insert.
+    *   A ClickHouse Materialized View pre-aggregates rows on insert, and an Express API serves reports from that summary table, with Prometheus + Grafana for observability.
 
 ### 2. Distributed Media Transcoding Pipeline (RabbitMQ + MinIO Object Storage)
 *   **The Goal:** Master asynchronous job queuing, heavy multi-core CPU background tasks, and S3-compatible local object storage.
