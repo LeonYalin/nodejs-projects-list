@@ -4,7 +4,7 @@ This repo contains a list of nodejs projects that should be done in order to bec
 # Phase 1: High-Performance Data Layers & Messaging
 
 ### 1. Enterprise Log ETL & Reporting Pipeline (Kafka + ClickHouse)
-*   **Repo:** ✅ [nodejs-enterprise-log-etl-and-reporting-pipeline-project](https://github.com/LeonYalin/nodejs-enterprise-log-etl-and-reporting-pipeline-project)
+*   **Repo:** ✅ [nodejs-enterprise-etl-pipeline](https://github.com/LeonYalin/nodejs-enterprise-etl-pipeline)
 *   **The Goal:** Master high-throughput data ingestion, batched transformations, and analytical write-optimization without blocking the event loop.
 *   **Production Challenge:** Handling millions of real-time server records and performing instant aggregations without overwhelming relational databases or filling up Node memory.
 *   **Tech Stack & Libraries:**
