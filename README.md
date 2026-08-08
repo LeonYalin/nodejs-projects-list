@@ -28,41 +28,43 @@ This repo contains a list of nodejs projects that should be done in order to bec
     *   Configure a durable RabbitMQ queue with explicit manual acknowledgments (`ack`/`nack`) and a Dead Letter Exchange (DLX) for corrupt file drops.
     *   Use `autocannon` to fire concurrent file uploads at your HTTP API. The API instantly writes the raw file to MinIO, pushes a metadata job payload to RabbitMQ, and returns a `202 Accepted` status. Your background worker process pulls jobs one by one, downloads from MinIO, transcodes via `ffmpeg`, and uploads the final version back to MinIO.
 
-### 3. E-Commerce Fuzzy Search & Autocomplete Engine (Elasticsearch)
-*   **The Goal:** Master text tokenization, index structures, typo tolerance, and ultra-fast text matching.
-*   **Production Challenge:** High-concurrency text searching across fields with typos and partial terms where standard databases fail at speed and relevance.
+### 3. E-Commerce Fuzzy Search & Autocomplete Engine (Full ELK Stack)
+*   **The Goal:** Master text tokenization, index structures, typo tolerance, Change Data Capture (CDC) streaming, and log/metric visualization using a unified enterprise search stack.
+*   **Production Challenge:** High-concurrency text searching across fields with typos and partial terms while maintaining sync between primary relational stores and the search index without application layer coupling.
 *   **Tech Stack & Libraries:**
-    *   *Search Engine:* Elasticsearch or OpenSearch.
-    *   *Node Libraries:* `@elastic/elasticsearch` (The official enterprise client), `dotenv`.
+    *   *Search & Logistics Stack:* Elasticsearch, Logstash, Kibana (The ELK Stack), PostgreSQL.
+    *   *Node Libraries:* `@elastic/elasticsearch` (Official enterprise client), `pg` (PostgreSQL client), `dotenv`.
 *   **Local Setup & Simulation Plan:**
-    *   Run a single-node development container of Elasticsearch via Docker.
-    *   Write an optimized batch seeding script using the Elasticsearch bulk API to push 50,000 mock catalog products into an index configured with an `edge_ngram` custom analyzer (essential for typing autocomplete).
-    *   Expose a search HTTP endpoint that builds multi-field match queries with explicit fuzziness parameters, allowing search terms like "iphnoe" to cleanly match "iPhone".
+    *   Run Elasticsearch, Logstash, Kibana, and PostgreSQL containers via Docker.
+    *   Seed PostgreSQL with 50,000 mock catalog products. Configure Logstash with a JDBC input plugin to poll PostgreSQL for real-time updates and automatically stream them into an Elasticsearch index configured with an `edge_ngram` custom analyzer (essential for typing autocomplete).
+    *   Expose a search HTTP endpoint that builds multi-field match queries with explicit fuzziness parameters, allowing search terms like "iphnoe" to cleanly match "iPhone". Use Kibana to build dashboards monitoring search latency and Logstash ingestion performance.
 
 ### 4. High-Frequency Financial Ticker Engine (Streams & Worker Threads)
-*   **The Goal:** Leverage underlying system hardware by breaking past the single-threaded nature of Node.js for CPU-heavy tasks.
-*   **Production Challenge:** Processing thousands of continuous WebSocket price ticks per second and running math-heavy aggregations (moving averages) without delaying the main event loop.
+*   **The Goal:** Leverage underlying system hardware by breaking past the single-threaded nature of Node.js for heavy CPU-bound data parsing and stream processing.
+*   **Production Challenge:** Processing thousands of continuous data ticks per second and running math-heavy aggregations (moving averages) without delaying the main event loop or incurring serialization lag.
 *   **Tech Stack & Libraries:**
     *   *Core Engine:* Node.js native `worker_threads` and `stream` modules.
-    *   *Node Libraries:* `ws` (The standard high-performance WebSocket engine).
+    *   *Node Libraries:* Native file system streams or in-memory array generators.
 *   **Local Setup & Simulation Plan:**
-    *   Write a separate mock market script that opens a local WebSocket connection and loops infinitely to broadcast randomized price objects every few milliseconds.
-    *   Your main application reads the continuous incoming stream, sends the arrays into a pool of background Node Worker Threads using `SharedArrayBuffer` to eliminate serialization lag, and handles calculation updates efficiently.
+    *   Write a mock market data script that generates a massive local binary file or loops infinitely in memory to broadcast continuous, high-volume price objects into a Node Readable Stream.
+    *   Your main application reads the continuous incoming stream, splits the pipeline using stream transforms, and distributes the data chunks into a pool of background Node Worker Threads.
+    *   Use `SharedArrayBuffer` to eliminate serialization lag between threads, calculating complex rolling metrics efficiently on background threads before streaming the aggregated values to standard output.
 
 ---
 
 # Phase 2: Resilience, Security, & API Gateways
 
-### 5. Resilient Webhook Ingestion Engine (Redis Distributed Locking + PostgreSQL)
-*   **The Goal:** Implement strict protective measures against traffic spikes and ensure idempotency (preventing accidental double-processing) using a relational database layer.
-*   **Production Challenge:** Securely handling external payment callbacks (like Stripe or PayPal) where network retries from the provider can accidentally trigger duplicate actions or state corruption.
+### 5. Resilient Webhook & Outbox Engine (Redis Distributed Locking + PostgreSQL)
+*   **The Goal:** Master strict protective traffic measures, concurrency controls, and the Transactional Outbox pattern to guarantee event idempotency and reliable event delivery.
+*   **Production Challenge:** Securely handling external payment callbacks where network retries from providers can cause duplicate database side-effects, and avoiding partial failures where database updates succeed but message broker notifications fail to send.
 *   **Tech Stack & Libraries:**
-    *   *Cache & DB:* Redis, PostgreSQL.
+    *   *Cache, DB & Broker:* Redis, PostgreSQL.
     *   *Node Libraries:* `ioredis` (Robust driver supporting atomic Lua scripts), `pg` (Standard Postgres client), `uuid`.
 *   **Local Setup & Simulation Plan:**
-    *   Run Redis and PostgreSQL containers via Docker.
-    *   Expose a webhook ingestion endpoint. Write defensive middleware that reads an event token and uses Redis's atomic `SET NX` command to acquire a short-lived distributed lock.
-    *   Simulate load using `k6` to send identical payload batches simultaneously. Confirm that exactly one request triggers the PostgreSQL database state modification, while all duplicates are instantly dropped with a `429 Too Many Requests` error.
+    *   Run Redis and PostgreSQL containers via Docker. Define an application state table alongside a dedicated `outbox` table in PostgreSQL.
+    *   Expose a webhook ingestion endpoint. Write defensive middleware that reads an event token and uses Redis's atomic `SET NX` command to acquire a short-lived distributed lock to reject concurrent processing.
+    *   Inside the logic, open a single atomic PostgreSQL transaction (`BEGIN` / `COMMIT`) that writes the verified application update *and* saves the event notification to the `outbox` table simultaneously.
+    *   Simulate load using `k6` to send identical payload batches concurrently, confirming exactly one transaction modifies state while duplicates drop with a `429 Too Many Requests` error. A separate background worker script continuously polls the outbox table to mimic forwarding successfully saved events outward.
 
 ### 6. Whitelabel Dynamic API Gateway (Nginx Reverse Proxy + SSL/HTTPS Management)
 *   **The Goal:** Master multi-tenant reverse proxy routing, SSL termination, and programmatic whitelabeling using Nginx.
@@ -75,16 +77,16 @@ This repo contains a list of nodejs projects that should be done in order to bec
     *   Use `mkcert` to issue wildcard local SSL certificates to verify seamless HTTPS handshakes through Nginx.
     *   Your Node application inspects incoming `Host` headers to verify valid custom domains, applying whitelabel routing parameters dynamically and altering headers before completing responses.
 
-### 7. Secure OAuth2/OIDC Identity Provider (Apache Cassandra NoSQL + Token Rotation)
-*   **The Goal:** Master stateless token authorization, asymmetric cryptography, and deep session control mapped to an ultra-high-scale wide-column database.
-*   **Production Challenge:** Designing a distributed authentication server that processes token validations and linear session footprints at immense scale without single points of data failure.
+### 7. Secure Identity Provider & RBAC (Apache Cassandra NoSQL + Token Rotation)
+*   **The Goal:** Master stateless token authorization, asymmetric cryptography, deep session control, and hierarchical Role-Based Access Control (RBAC) schemas mapped to an ultra-high-scale wide-column database.
+*   **Production Challenge:** Designing a distributed authentication server that processes millions of token validations, permission evaluations, and linear session footprints at immense scale without structural single points of data failure.
 *   **Tech Stack & Libraries:**
     *   *Core Engine & DB:* Apache Cassandra (Wide-column NoSQL database).
     *   *Node Libraries:* `cassandra-driver`, `jsonwebtoken`, `bcrypt`, Node's native `crypto` module.
 *   **Local Setup & Simulation Plan:**
-    *   Run a single-node Apache Cassandra instance via Docker. Define a keyspace tracking active token lineages using optimized primary/clustering keys.
-    *   Use Node's native `crypto` module to generate RSA public/private key pairs locally to handle token signatures.
-    *   Write integration tests simulating token theft: if a user submits an older refresh token twice, your system must trigger its automatic security hook, invalidating all related tokens in that family branch within Cassandra immediately.
+    *   Run a single-node Apache Cassandra instance via Docker. Define a keyspace optimized to store user token histories alongside deeply nested corporate role and permission mappings.
+    *   Use Node's native `crypto` module to generate RSA public/private key pairs locally to handle cryptographic token signatures.
+    *   Expose endpoints that evaluate dynamic middleware permissions (e.g., Admin vs Manager) against the wide-column Cassandra lookups. Write integration tests simulating token theft: if a user submits an older refresh token twice, your system must trigger an automatic security hook, invalidating all related tokens in that family branch within Cassandra immediately.
 
 ---
 
@@ -101,26 +103,16 @@ This repo contains a list of nodejs projects that should be done in order to bec
     *   Implement an internal central `EventEmitter` bus inside the Node application layer to safely decouple incoming socket payloads from secondary actions (e.g., analytics triggers, metric gathering).
     *   Connect to both ports using **wscat**. Prove that pushing a websocket message into port 4001 fires an internal EventEmitter event, passes out to Redis Pub/Sub, and makes the socket connected on port 4002 print the message instantly.
 
-### 9. Automated Batch Scheduler (Distributed Crons + MongoDB)
-*   **The Goal:** Implement automated periodic data aggregations that execute safely without doubling up tasks or breaking under deployment cycles.
-*   **Production Challenge:** Running a cron job on a multi-instance production setup without having the job fire multiple times, and ensuring mid-process jobs exit cleanly during a container update.
+### 9. Fault-Tolerant Cloud-Native Deployment (Kubernetes + Helm + Terraform)
+*   **The Goal:** Master automated cloud infrastructure provisioning, enterprise container orchestration, and application layer circuit-breaking mechanisms.
+*   **Production Challenge:** Isolating third-party dependency crashes from your critical runtime pathways, keeping distributed services auto-healing under load, and managing infrastructure predictably using declarative configuration files.
 *   **Tech Stack & Libraries:**
-    *   *Database:* MongoDB.
-    *   Node Libraries: `agenda` (highly popular MongoDB-backed cron manager) or `bullmq` (Redis-backed repeat scheduler), `pdfkit` (streaming PDF creator), `nodemailer`.
-*   **Local Setup & Simulation Plan**:
-    *   Run a database container alongside **Mailhog** (a free developer SMTP tool that intercepts outbound mail for local UI viewing).
-    *   Seed your database with 5,000 mock user rows. Open three distinct terminal windows running the app simultaneously.
-    *   Simulate high-availability coordination: trigger a heavy PDF billing report aggregation job and observe the logs to confirm only one instance claims the execution lock while others go idle. Force-quit (`SIGTERM`) a running job to confirm it recovers gracefully without dropping data.
-
-### 10. Fault-Tolerant Distributed Asset Scraper (Kubernetes + Helm Deployment Lifecycle)
-*   **The Goal**: Architect external API fault tolerance using circuit breakers and master cloud-native orchestration pipelines.
-*   **Production Challenge**: Isolating third-party scraping crashes from your application layer, keeping web scrapers auto-healing, and declaring predictable deployments using infrastructure-as-code.
-*   **Tech Stack & Libraries**:
-    *   *Orchestration*: Kubernetes (Local cluster via Docker Desktop or Minikube), Helm (Kubernetes package manager).
-    *   *Node Libraries*: `opossum` (circuit breaker engine), `axios`, `cheerio` (for fast asset parsing).
-*   **Local Setup & Simulation Plan**:
-    *   Write a target mock script on port `9000` that is programmed to deliberately throw `500 errors` or slow delays 80% of the time to act as your unstable target endpoint.
-    *   Package your web-scraping Node.js application into a custom Docker image and write a **Helm Chart** to manage its values, resource constraints, replication bounds, and readiness/liveness probes.
-    *   Deploy the chart to your local Kubernetes cluster. Run a stress-test query script and inspect your application logs to watch the opossum circuit breaker trip **Open** to preserve cluster resources, while Kubernetes auto-heals any replica nodes that hit unhandled limits.
+    *   *Orchestration & IaC:* Terraform (Local file/Docker providers), Kubernetes (Local cluster via Docker Desktop or Minikube), Helm (Kubernetes package manager).
+    *   *Node Libraries:* `opossum` (Circuit breaker engine), `axios`.
+*   **Local Setup & Simulation Plan:**
+    *   Write a trivial downstream target mock script on port `9000` that is programmed to deliberately throw `500 Internal Server Errors` or heavy timeouts 80% of the time to act as an unstable downstream dependency.
+    *   Use **Terraform** locally to manage your local container registry contexts, networking boundaries, and persistent volume mount structures.
+    *   Package a simple asset-fetching Node.js application into a custom Docker image and write a **Helm Chart** defining resource limits, replication bounds, liveness/readiness probes, and horizontal pod autoscalers.
+    *   Deploy your Helm release onto the local Kubernetes cluster. Run a stress-test load script using `autocannon` against the application, verifying the `opossum` circuit breaker trips **Open** to shield internal resources, while monitoring your local cluster dashboard as Kubernetes spins up replacement pods when specific processing boundaries are exceeded.
 
 
