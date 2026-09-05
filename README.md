@@ -54,17 +54,21 @@ This repo contains a list of nodejs projects that should be done in order to bec
 
 # Phase 2: Resilience, Security, & API Gateways
 
-### 5. Resilient Webhook & Outbox Engine (Redis Distributed Locking + PostgreSQL)
-*   **The Goal:** Master strict protective traffic measures, concurrency controls, and the Transactional Outbox pattern to guarantee event idempotency and reliable event delivery.
-*   **Production Challenge:** Securely handling external payment callbacks where network retries from providers can cause duplicate database side-effects, and avoiding partial failures where database updates succeed but message broker notifications fail to send.
+### 5. Resilient Webhook Ingestion & Event-Sourced Outbox Engine (Redis + PostgreSQL)
+*   **The Goal:** Master strict protective traffic measures, concurrency controls, Event Sourcing mechanics, and the Transactional Outbox pattern to guarantee event idempotency, reliable microservices communication, and state replayability.
+*   **Production Challenge:** Securely capturing external payment callbacks, avoiding duplicate side-effects via distributed locks, and solving the "dual-write" problem where updating the database succeeds but notifying downstream microservices fails.
 *   **Tech Stack & Libraries:**
-    *   *Cache, DB & Broker:* Redis, PostgreSQL.
-    *   *Node Libraries:* `ioredis` (Robust driver supporting atomic Lua scripts), `pg` (Standard Postgres client), `uuid`.
+    *   *Infrastructure:* Redis, PostgreSQL.
+    *   *Node Libraries:* `ioredis` (Atomic Lua scripting/locks), `pg` (Postgres client), `uuid`.
 *   **Local Setup & Simulation Plan:**
-    *   Run Redis and PostgreSQL containers via Docker. Define an application state table alongside a dedicated `outbox` table in PostgreSQL.
-    *   Expose a webhook ingestion endpoint. Write defensive middleware that reads an event token and uses Redis's atomic `SET NX` command to acquire a short-lived distributed lock to reject concurrent processing.
-    *   Inside the logic, open a single atomic PostgreSQL transaction (`BEGIN` / `COMMIT`) that writes the verified application update *and* saves the event notification to the `outbox` table simultaneously.
-    *   Simulate load using `k6` to send identical payload batches concurrently, confirming exactly one transaction modifies state while duplicates drop with a `429 Too Many Requests` error. A separate background worker script continuously polls the outbox table to mimic forwarding successfully saved events outward.
+    *   **Database Schema:** Run Redis and PostgreSQL via Docker. Define an `outbox_events` table (acting jointly as the Event Store log and the Transactional Outbox table) and a `payment_projections` table (representing the current read/write state).
+    *   **Ingestion Guard:** Build a webhook endpoint that uses Redis `SET NX` to acquire a short-lived distributed lock. Reject concurrent duplicate retry attempts immediately with a `429 Too Many Requests` error.
+    *   **Atomic Outbox Commit:** Inside a single atomic PostgreSQL transaction (`BEGIN` / `COMMIT`), append the new immutable event to the `outbox_events` table and update the current state in the `payment_projections` table simultaneously.
+    *   **The Event Sourcing Twist (State Replay):** Write a CLI script that deletes a row from `payment_projections`, reads all historical events for that specific ID sequentially from the `outbox_events` table, and completely rebuilds the current state from scratch.
+    *   **Microservices Outbox Worker:** Write a separate background worker script (the Outbox Relayer) that continuously polls or streams unsent entries from the `outbox_events` table, simulates forwarding them to downstream microservices, and marks them as processed to guarantee at-least-once delivery.
+    *   **Load Testing:** Use `k6` to send identical payload batches concurrently. Verify that the distributed lock drops duplicates, sequence numbers in the outbox remain gap-free, and the outbox worker successfully broadcasts events forward without missing data.
+
+
 
 ### 6. Whitelabel Dynamic API Gateway (Nginx Reverse Proxy + SSL/HTTPS Management)
 *   **The Goal:** Master multi-tenant reverse proxy routing, SSL termination, and programmatic whitelabeling using Nginx.
@@ -103,16 +107,37 @@ This repo contains a list of nodejs projects that should be done in order to bec
     *   Implement an internal central `EventEmitter` bus inside the Node application layer to safely decouple incoming socket payloads from secondary actions (e.g., analytics triggers, metric gathering).
     *   Connect to both ports using **wscat**. Prove that pushing a websocket message into port 4001 fires an internal EventEmitter event, passes out to Redis Pub/Sub, and makes the socket connected on port 4002 print the message instantly.
 
-### 9. Fault-Tolerant Cloud-Native Deployment (Kubernetes + Helm + Terraform)
-*   **The Goal:** Master automated cloud infrastructure provisioning, enterprise container orchestration, and application layer circuit-breaking mechanisms.
-*   **Production Challenge:** Isolating third-party dependency crashes from your critical runtime pathways, keeping distributed services auto-healing under load, and managing infrastructure predictably using declarative configuration files.
+### 9. Fault-Tolerant Cloud Deployment & GitOps Automation (Kubernetes + Helm + Terraform + GitHub Actions)
+*   **The Goal:** Master automated cloud infrastructure provisioning, enterprise container orchestration, application-layer circuit-breaking mechanisms, and multi-stage production GitOps pipelines.
+*   **Production Challenge:** Isolating third-party dependency crashes from critical runtime pathways, keeping distributed services auto-healing under load, managing infrastructure predictably using declarative configuration files, and building automated quality gates that safely test, secure, and containerize code before deployment.
 *   **Tech Stack & Libraries:**
-    *   *Orchestration & IaC:* Terraform (Local file/Docker providers), Kubernetes (Local cluster via Docker Desktop or Minikube), Helm (Kubernetes package manager).
+    *  *CI/CD & Delivery*: GitHub Actions, Docker Registry, Security scanners (`gitleaks`, `npm audit`, `trivy`).
+    *   *Orchestration & IaC*: Terraform (Local file/Docker providers), Kubernetes (Local cluster via Docker Desktop, Minikube, or Kind), Helm (Kubernetes package manager).
     *   *Node Libraries:* `opossum` (Circuit breaker engine), `axios`.
 *   **Local Setup & Simulation Plan:**
-    *   Write a trivial downstream target mock script on port `9000` that is programmed to deliberately throw `500 Internal Server Errors` or heavy timeouts 80% of the time to act as an unstable downstream dependency.
-    *   Use **Terraform** locally to manage your local container registry contexts, networking boundaries, and persistent volume mount structures.
-    *   Package a simple asset-fetching Node.js application into a custom Docker image and write a **Helm Chart** defining resource limits, replication bounds, liveness/readiness probes, and horizontal pod autoscalers.
-    *   Deploy your Helm release onto the local Kubernetes cluster. Run a stress-test load script using `autocannon` against the application, verifying the `opossum` circuit breaker trips **Open** to shield internal resources, while monitoring your local cluster dashboard as Kubernetes spins up replacement pods when specific processing boundaries are exceeded.
+    *   **The Automated Quality & Containerization Pipeline**: Write a production-grade GitHub Actions workflow that executes automatically on code changes. Structure it into rigid validation phases:
+        *   *Code Health*: Run automated code linting and strict TypeScript compilation checks.
+        *   *Security Audits*: Scan for dependency CVE vulnerabilities using `npm audit` and prevent hardcoded credentials leaks using a specialized static scanner like `gitleaks`.
+        *   *Multi-Arch Packaging*: Compile the Node.js application into a production-optimized, multi-stage Docker image, utilizing advanced layer caching strategies to speed up pipeline execution.
+        *   *Image Security*: Run an automated vulnerability assessment on the final built image using a tool like `trivy` before signing off on the release.
+    *  ** The Infrastructure & Configuration Phase**: Use **Terraform** locally to manage your local container registry contexts, networking boundaries, and persistent volume mount structures. Package the application into a custom **Helm Chart** that declaratively defines CPU/Memory resource constraints, replication boundaries, horizontal pod autoscalers (HPA), and native Kubernetes liveness and readiness health probes.
+    *   **The Resiliency & Fault-Tolerance Simulation**: Write a trivial downstream target mock script on port `9000` that is programmed to deliberately throw `500 Internal Server Errors` or heavy timeouts 80% of the time to simulate an unstable third-party API.
+    *   **The Live Load Test**: Deploy your verified Helm release onto your local Kubernetes cluster. Execute a heavy stress-test script using `autocannon` against the deployed gateway service. Verify that your application's `opossum` circuit breaker smoothly trips **Open** to shield local node event loops from cascading network lag, while simultaneously observing your local cluster dashboard as Kubernetes spins up fresh pod replicas when configured processing metric boundaries are exceeded.
+
+    ### 10.  Uber-Style Real-Time Delivery Matcher & Geo-Analytics Engine (PostgreSQL + PostGIS)
+
+*   ***The Goal:** Master advanced relational data design, specialized geospatial indexing (`GiST`), and high-performance spatial queries by building the core backend routing engine for a ride-hailing service.
+*   ***Production Challenge:** Safely storing massive histories of trips, calculating complex location-based matches (e.g., finding the 5 closest available drivers to a passenger instantly), and identifying high-demand areas (Surge Pricing zones) without destroying database CPU performance.
+*   ***Tech Stack & Libraries:**
+    *   **Database:* PostgreSQL with the **PostGIS** extension enabled.
+    *   **Node Libraries:* `pg` (Official Postgres client), `fastify` or `express`.
+    *   **System Tool:* Docker (using the `postgis/postgis` image).
+*   ***Local Setup & Simulation Plan:**
+    *   *Spin up a PostGIS container via Docker. Seed the database with a clean relational schema: `drivers` (with current coordinates), `passengers`, and `rides` (storing start/end pickup geometry paths).
+    *   ***Geospatial Indexing:** Map latitude and longitude fields into official PostGIS geography points and bind a **GiST (Generalized Search Tree)** index to that column.
+    *   ***The Uber-Style Match:** Expose an HTTP endpoint where a passenger requests a ride. Your Node app executes an optimized SQL query using `ST_DWithin` and the `<->` KNN distance operator to instantly find and lock the nearest 5 available drivers sorted by physical proximity within milliseconds.
+    *   ***Dynamic Surge Analytics:** Store high-demand polygon shapes (e.g., concert venues or downtown grid coordinates) as `GEOMETRY` zones. Write a query using `ST_Contains` to detect if a passenger's pickup location falls inside a high-demand zone to dynamically apply a pricing multiplier.
+    *   *Use `k6` to blast hundreds of concurrent driver location coordinate updates (`PING` updates) per second into the server, verifying that the database cleanly indexes the moving coordinates while serving passenger match requests without lag.
+
 
 
