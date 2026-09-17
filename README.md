@@ -17,16 +17,17 @@ This repo contains a list of nodejs projects that should be done in order to bec
     *   A ClickHouse Materialized View pre-aggregates rows on insert, and an Express API serves reports from that summary table, with Prometheus + Grafana for observability.
 
 ### 2. Distributed Media Transcoding Pipeline (RabbitMQ + MinIO Object Storage)
+*   **Repo:** ✅ [nodejs-media-transcoding-pipeline](https://github.com/LeonYalin/nodejs-media-transcoding-pipeline)
 *   **The Goal:** Master asynchronous job queuing, heavy multi-core CPU background tasks, and S3-compatible local object storage.
 *   **Production Challenge:** Offloading long-running file operations (resizing images, encoding video), securing uploads so tasks aren't lost on server crashes, and keeping heavy processing out of memory.
 *   **Tech Stack & Libraries:**
-    *   *Queue & Storage:* RabbitMQ, MinIO (Free, local S3-compatible cloud object storage container).
-    *   *Framework & Node Libraries:* Fastify or Express, `amqplib`, `sharp`, `fluent-ffmpeg`, `@aws-sdk/client-s3` (Standard AWS SDK v3 to talk to MinIO).
-    *   *System Tool:* Native `ffmpeg` binary installed on macOS via Homebrew.
+    *   *Queue, Storage & State:* RabbitMQ (quorum queues), MinIO (Free, local S3-compatible cloud object storage container), Redis (job state + SSE progress).
+    *   *Framework & Node Libraries:* Fastify, `amqplib`, `sharp`, `fluent-ffmpeg`, `@aws-sdk/client-s3` + `@aws-sdk/lib-storage` (Standard AWS SDK v3 to talk to MinIO), `ioredis`, `zod`.
+    *   *System Tool:* A static `ffmpeg`/`ffprobe` build baked into the worker Docker image — deliberately never installed on the host.
 *   **Local Setup & Simulation Plan:**
-    *   Run RabbitMQ (with web management UI) and MinIO via Docker.
-    *   Configure a durable RabbitMQ queue with explicit manual acknowledgments (`ack`/`nack`) and a Dead Letter Exchange (DLX) for corrupt file drops.
-    *   Use `autocannon` to fire concurrent file uploads at your HTTP API. The API instantly writes the raw file to MinIO, pushes a metadata job payload to RabbitMQ, and returns a `202 Accepted` status. Your background worker process pulls jobs one by one, downloads from MinIO, transcodes via `ffmpeg`, and uploads the final version back to MinIO.
+    *   Run RabbitMQ (with web management UI), MinIO, Redis and the workers via Docker, the workers scaled as compose replicas. Observability via Prometheus + Grafana and OpenTelemetry → Jaeger.
+    *   The API streams each multipart upload straight into MinIO (never buffering it), publishes a persistent job on a **confirm channel**, and returns `202 Accepted` only once the broker has accepted it. A single durable quorum queue with manual `ack`/`nack` at `prefetch(1)` gives one job in flight per container, with a TTL delay queue for bounded retries via a Dead Letter Exchange and a terminal "parked" queue for corrupt files.
+    *   Workers stream images through `sharp`, and fan video out into an **HLS ladder**: a fast `ffprobe` planning stage emits one job per rendition, rungs encode in parallel across replicas, and a redelivery-safe Redis barrier lets the last one finish the master playlist. A browser UI follows progress over SSE and plays the result with `hls.js`; a load script sustains ~1,000 uploads/sec at 100% `202` while queue depth grows and drains.
 
 ### 3. E-Commerce Fuzzy Search & Autocomplete Engine (Full ELK Stack)
 *   **The Goal:** Master text tokenization, index structures, typo tolerance, Change Data Capture (CDC) streaming, and log/metric visualization using a unified enterprise search stack.
