@@ -29,112 +29,110 @@ This repo contains a list of nodejs projects that should be done in order to bec
     *   The API streams each multipart upload straight into MinIO (never buffering it), publishes a persistent job on a **confirm channel**, and returns `202 Accepted` only once the broker has accepted it. A single durable quorum queue with manual `ack`/`nack` at `prefetch(1)` gives one job in flight per container, with a TTL delay queue for bounded retries via a Dead Letter Exchange and a terminal "parked" queue for corrupt files.
     *   Workers stream images through `sharp`, and fan video out into an **HLS ladder**: a fast `ffprobe` planning stage emits one job per rendition, rungs encode in parallel across replicas, and a redelivery-safe Redis barrier lets the last one finish the master playlist. A browser UI follows progress over SSE and plays the result with `hls.js`; a load script sustains ~1,000 uploads/sec at 100% `202` while queue depth grows and drains.
 
-### 3. E-Commerce Search & Production Logging Platform (Full ELK Stack)
-*   **The Goal:** Master Elasticsearch itself — mapping design, text analysis and tokenization, relevance scoring, aggregations, and the index lifecycle — plus structured JSON logging, the other canonical ELK use case.
-*   **Production Challenge:** Serving high-concurrency text search that tolerates typos and partial terms, keeping relevance tuned as the catalog grows, and changing mappings with zero downtime — while shipping machine-queryable application logs instead of the plain strings most services emit.
+### 3. Driver Dispatch & Geo Queries (PostgreSQL Deep Dive + PostGIS)
+*   **The Goal:** Master PostgreSQL essentials — constraints, index selection proven with `EXPLAIN ANALYZE`, transactions, isolation and row locking, CTEs and window functions, connection pooling from Node, and zero-downtime schema migrations — with PostGIS location data as the domain.
+*   **Production Challenge:** Ingesting a constant stream of driver location pings while answering "nearest available drivers" in milliseconds, never assigning one driver to two passengers, and evolving the schema of a populated table without downtime.
 *   **Tech Stack & Libraries:**
-    *   *Search & Logging Stack:* Elasticsearch, Logstash, Kibana, Filebeat (The ELK Stack).
-    *   *Node Libraries:* `@elastic/elasticsearch` (Official enterprise client), `pino` (structured JSON logging), `fastify`, `zod`.
+    *   *Database:* PostgreSQL with the PostGIS extension (`postgis/postgis` image).
+    *   *Node Libraries:* `pg` (raw SQL, no ORM), `node-pg-migrate`, `fastify`, `zod`.
 *   **Local Setup & Simulation Plan:**
-    *   Run Elasticsearch, Logstash, Kibana and Filebeat via Docker. No relational store — seed 50,000 mock catalog products from a local fixture file straight into Elasticsearch with the Bulk API.
-    *   **Index design:** hand-write the mapping instead of relying on dynamic mapping. Build a custom analyzer chain (an `edge_ngram` analyzer for autocomplete, a separate one for full search) and learn where `keyword` beats `text` for filtering, sorting and aggregating.
-    *   **Relevance:** expose a search endpoint building `multi_match` queries with explicit fuzziness, per-field boosting and `function_score`. Use the `_explain` API to understand *why* a document scored where it did, tuning "iphnoe" → "iPhone" deliberately rather than by accident. Layer faceted filtering on top with aggregations.
-    *   **Lifecycle:** write through an alias rather than directly to an index, then perform a zero-downtime reindex behind that alias when the mapping changes.
-    *   **Production logging:** emit structured JSON logs from the Node app — correlation ID per request, level-aware serializers, redaction of secrets — ship them Filebeat → Logstash → Elasticsearch, and build Kibana dashboards for search latency, error rates and slow queries.
+    *   Run PostGIS via Docker with a small `drivers` / `rides` / `zones` schema whose rules live in constraints — including a partial unique index allowing one active ride per driver. A script streams location pings, upserted with `ON CONFLICT`.
+    *   Find nearest drivers with `ST_DWithin` and the `<->` KNN operator over a GiST index, and justify every index (B-tree, GiST, GIN on a small jsonb column) with `EXPLAIN ANALYZE`. Use keyset pagination for ride history, and CTEs, window functions and `ST_Contains` to rank zones by live demand.
+    *   Reproduce two passengers grabbing the same driver, then fix it with a transaction and `FOR UPDATE SKIP LOCKED` on a single checked-out pool client, comparing isolation levels along the way.
+    *   **Migrations:** manage the schema with `node-pg-migrate`, and look at how it tracks applied migrations in its own table and uses an advisory lock to stop two instances migrating at once. Move `lat`/`lng` floats to a PostGIS `geography` column on the live table with expand/contract: add column, dual-write, batched backfill, `CREATE INDEX CONCURRENTLY`, switch reads, drop the old columns.
 
-### 4. High-Frequency Financial Ticker Engine (Streams & Worker Threads)
-*   **The Goal:** Master Node's in-process concurrency and data primitives — `worker_threads`, `SharedArrayBuffer`, hand-written streams and backpressure, `EventEmitter` and `AsyncLocalStorage` — the parts of Node that containers and OS processes never teach you.
-*   **Production Challenge:** Processing thousands of continuous data ticks per second and running math-heavy rolling aggregations without delaying the main event loop or paying serialization cost on every hop between threads.
+---
+
+# Phase 2: Infrastructure, Observability & Node Internals
+
+### 4. URL Shortener on Kubernetes & GitOps Pipeline (GitHub Actions + Helm + Terraform + Argo CD)
+*   **The Goal:** Master how a Node service gets from `git push` to a running cluster — container images, CI quality gates, core Kubernetes objects, Helm packaging, Infrastructure as Code, and GitOps, where git is the single source of truth for what runs — and the Node code that makes a service deployable: health checks, graceful shutdown, config from the environment.
+*   **Production Challenge:** Shipping changes repeatably and without downtime: no manual `kubectl`, config and secrets per environment, schema migrations that don't break old pods still running mid-rollout, and rollbacks and self-healing that need no human.
+*   **Tech Stack & Tools:**
+    *   *App:* a small URL shortener — a Fastify **API** (create link, redirect, record click) and a **worker** that rolls raw clicks up into per-link stats; PostgreSQL, `pg`, `node-pg-migrate`, `zod`.
+    *   *CI & Registry:* GitHub Actions, GitHub Container Registry (`ghcr.io`).
+    *   *Cluster & IaC:* k3d (Kubernetes in Docker), Terraform (`kubernetes` + `helm` providers), Helm, Argo CD.
+*   **Local Setup & Simulation Plan:**
+    *   **Make the app deployable:** config only from env vars validated with `zod`; `/healthz` (liveness: the process is alive) separate from `/readyz` (readiness: the database is reachable); `SIGTERM` handling that drains in-flight requests in the API and finishes the current batch in the worker; a `/version` endpoint to see which build serves.
+    *   **CI:** on every push, lint and test, build multi-stage images for both services, push them as private images to `ghcr.io` tagged with the commit SHA, and bump the tag in the deployment manifests in git. The cluster pulls them with an `imagePullSecret`.
+    *   **Terraform** owns the cluster-level setup — `dev` and `staging` namespaces, secrets, an ingress controller, and Argo CD itself — teaching state, `plan` vs `apply`, and drift.
+    *   **Helm chart:** API Deployment (2 replicas, Service, Ingress, probes), worker Deployment (no Service), ConfigMap and Secret, resource limits, and Postgres as a StatefulSet with a persistent volume; per-environment values files.
+    *   **GitOps & safe rollouts:** Argo CD syncs the cluster from git — a manual `kubectl edit` gets reverted, `git revert` is the rollback. Migrations run as a Helm `pre-upgrade` hook Job: rename a column in one step and watch old pods fail mid-rollout, then redo it with expand/contract. `kubectl delete pod` under load must produce zero failed requests.
+
+### 5. E-Commerce Product Search & Centralized Logging (ELK Stack)
+*   **The Goal:** Master Elasticsearch's two canonical uses — full-text search (mappings, analyzers, relevance tuning, aggregations, zero-downtime mapping changes) and centralized logging (structured JSON logs from Node shipped through Filebeat and Logstash into Kibana).
+*   **Production Challenge:** Serving fast, typo-tolerant, partial-term search with facets whose relevance stays sensible as the catalog grows and whose mappings change without downtime — and turning application logs into queryable data (latency, errors, searches that found nothing) instead of plain strings.
 *   **Tech Stack & Libraries:**
-    *   *Core Engine:* Node.js native `worker_threads`, `stream`, `events`, `async_hooks` (`AsyncLocalStorage`) and `cluster` modules.
+    *   *Search & Logging Stack:* Elasticsearch, Logstash, Kibana, Filebeat.
+    *   *Node Libraries:* `@elastic/elasticsearch`, `pino`, `fastify`, `zod`.
+*   **Local Setup & Simulation Plan:**
+    *   Run single-node Elasticsearch, Kibana, Logstash and Filebeat via Docker, and seed 50,000 products from a fixture file with the Bulk API helper — no relational store.
+    *   **Index design:** hand-written mapping (`text` vs `keyword`), an `edge_ngram` analyzer for autocomplete and a stemming + synonyms analyzer for full search — inspecting the tokens each produces with the `_analyze` API.
+    *   **Search API:** `multi_match` with fuzziness, per-field boosts and `function_score` for popularity; exact filters in filter context; faceted aggregations; `search_after` for deep pagination; and `_explain` to tune "iphnoe" → "iPhone" deliberately rather than by accident.
+    *   **Zero-downtime mapping change:** the app reads and writes through an alias; add synonyms, reindex into a new index, and swap the alias atomically.
+    *   **Logging:** `pino` JSON logs with a request ID and secret redaction → Filebeat reads the container logs → Logstash parses, enriches and drops health-check noise → a data stream with an ILM retention policy. A Kibana dashboard shows search latency, error rate and zero-result searches.
+
+### 6. High-Frequency Market Data Engine (Streams, Worker Threads & Node Internals)
+*   **The Goal:** Master Node's in-process concurrency and data primitives — hand-written streams and backpressure, binary data with `Buffer`, `worker_threads` with `SharedArrayBuffer` and `Atomics`, `EventEmitter` and `AsyncLocalStorage` — and learn to *prove* the event loop stays free and to find hot spots and memory leaks with Node's built-in tools.
+*   **Production Challenge:** A market feed delivers ~100,000 binary price ticks per second. The service must compute rolling per-symbol statistics (moving average, VWAP) and fire alerts on sharp moves without blocking the event loop, without paying serialization cost on every hop between threads, and without memory growing over hours of uptime.
+*   **Tech Stack & Libraries:**
+    *   *Core:* Node.js native `stream`, `buffer`, `worker_threads`, `events`, `async_hooks` (`AsyncLocalStorage`), `perf_hooks` and `http` modules.
     *   *Node Libraries:* Nothing beyond the standard library — that is the point of this one.
 *   **Local Setup & Simulation Plan:**
-    *   Write a mock market data script that generates a massive local binary file or loops infinitely in memory to broadcast continuous, high-volume price ticks into a Node `Readable` stream.
-    *   Build the pipeline out of **hand-written stream classes** — a `Transform` that decodes the binary tick format, another that batches — composed with `pipeline()`. Deliberately under-provision a consumer to watch backpressure engage, and tune `highWaterMark` to see it move.
-    *   Distribute chunks into a pool of background Worker Threads, using `SharedArrayBuffer` and `Atomics` for the rolling-window buffer so threads read and write shared memory with zero serialization. Benchmark it against plain `postMessage` structured cloning to feel the difference.
-    *   Use an internal `EventEmitter` bus to decouple tick ingestion from secondary reactions (alerts, counters, metric gathering), and `AsyncLocalStorage` to carry a correlation ID through the async pipeline without threading it through every function signature.
-    *   *Out of scope on purpose:* profiling, metrics and dashboards — Projects 1 and 2 already covered observability.
+    *   **Feed & streams:** a generator writes fixed-layout binary ticks (symbol id, price, volume, timestamp) into a `Readable`. Hand-written `Transform` classes decode them — including ticks split across chunk boundaries — and batch them, composed with `pipeline()` and cancelled via `AbortSignal`. Under-provision a consumer to watch backpressure engage, and tune `highWaterMark` to see it move.
+    *   **Worker pool:** a hand-written pool of `worker_threads`, each owning a shard of symbols. Rolling windows live in ring buffers inside a `SharedArrayBuffer` coordinated with `Atomics`. Benchmark three ways of passing data: `postMessage` structured cloning, transferring an `ArrayBuffer`, and shared memory.
+    *   **Decoupling:** an internal `EventEmitter` bus delivers alerts and counters to separate listeners (learning the `'error'` event and max-listener leak warnings), and `AsyncLocalStorage` carries a batch correlation ID through every async step into the logs without threading it through function signatures.
+    *   **Prove it:** a native `http` status endpoint reports live stats and event-loop delay from `perf_hooks.monitorEventLoopDelay` — compare the math on the main thread vs in workers. Find the hot path with `--cpu-prof`, then plant a leak (a listener that is never removed) and track it down with a heap snapshot in Chrome DevTools.
 
 ---
 
-# Phase 2: Resilience, Security, & API Gateways
+# Phase 3: Distributed Systems, Security & AI
 
-### 5. Event-Driven Microservices & Transactional Outbox (Stripe + tRPC + PostgreSQL)
-*   **The Goal:** Master service decomposition and the two ways services talk to each other — synchronous typed RPC and asynchronous events — with the Transactional Outbox pattern guaranteeing that a state change and the event announcing it can never diverge.
-*   **Production Challenge:** The dual-write problem: a database commit succeeds but the broker publish fails, and the rest of the system never learns what happened. Compounded by external payment providers that retry callbacks aggressively, so every consumer must be idempotent or duplicates become real money.
+### 7. Order & Payment Microservices with Transactional Outbox (tRPC + Stripe + Redis Streams)
+*   **The Goal:** Master service decomposition and the two ways services talk — synchronous typed RPC and asynchronous events — with the Transactional Outbox guaranteeing that a state change and the event announcing it can never diverge, and idempotency making retries safe.
+*   **Production Challenge:** The dual-write problem: a database commit succeeds but the event publish fails, and the rest of the system never learns what happened. Compounded by payment providers that retry webhooks aggressively, so every consumer must be idempotent or duplicates become real money.
 *   **Tech Stack & Libraries:**
-    *   *Services, DB & Broker:* PostgreSQL (a schema per service), RabbitMQ (or Redis Streams), Stripe (test mode).
-    *   *Node Libraries:* `@trpc/server` + `@trpc/client` (typed synchronous service-to-service calls), `stripe`, `pg`, `zod`, `fastify`.
-    *   *Supporting:* `ioredis` for a distributed lock — used only where the outbox work genuinely needs one, not as the headline.
+    *   *Services, DB & Broker:* two services — **orders** and **payments** — in a pnpm-workspace monorepo; PostgreSQL (a schema per service), Redis Streams as the event broker, Stripe (test mode) with the Stripe CLI forwarding webhooks.
+    *   *Node Libraries:* `@trpc/server` + `@trpc/client`, `stripe`, `pg`, `ioredis`, `fastify`, `zod`.
 *   **Local Setup & Simulation Plan:**
-    *   Split the system into three small services — **orders**, **payments**, **notifications** — each owning its own schema, all run via Docker Compose.
-    *   **The synchronous path (tRPC):** orders calls payments over tRPC for the operations that need an answer immediately, with end-to-end type inference and no hand-written client or schema file. Then learn where it breaks — kill the payments service and watch what a synchronous dependency does to your availability.
-    *   **The asynchronous path (outbox):** ingest Stripe webhooks with signature verification. Inside a **single** PostgreSQL transaction, write the application state change *and* insert the event row into an `outbox` table. A separate relay worker polls that table and publishes to the broker, so a broker outage can never lose an event the database already committed.
-    *   **Idempotency:** Stripe retries webhooks, so key every event by its Stripe event ID and make consumers dedupe on it. Replay the same webhook 50 times concurrently with `k6` and confirm exactly one state change and exactly one outbound event.
-    *   **Failure handling:** exponential backoff with jitter in the relay, and a compensating action (saga) for the case where the payment captures but order fulfillment fails — the failure mode that makes distributed transactions interesting.
+    *   **The synchronous path (tRPC):** orders reserves stock and calls payments over tRPC to create a Stripe PaymentIntent, fully typed by importing the payments router's type — no generated client. Kill payments and watch order creation fail; add timeouts and decide what the caller does when payments is down.
+    *   **The asynchronous path (outbox):** payments verifies the Stripe webhook signature and, in **one** PostgreSQL transaction, updates the payment and inserts an `outbox` row. A relay claims rows with `FOR UPDATE SKIP LOCKED` (safe with several replicas) and publishes them to a Redis Stream with exponential backoff and jitter. Stop Redis, keep paying, restart it, and confirm no event was lost.
+    *   **Idempotency:** orders consumes through a Redis consumer group (`XACK`, and the pending-entries list to recover messages from crashed consumers). Dedupe at every layer — Stripe event IDs on the webhook, an inbox table on the consumer, an `Idempotency-Key` header on order creation — then replay one signed webhook 50 times concurrently and confirm exactly one state change and one event.
+    *   **Compensation (saga):** when a payment succeeds after the order's stock reservation has expired, orders publishes a compensation event and payments refunds through Stripe.
 
-### 6. Whitelabel Dynamic API Gateway (Nginx Reverse Proxy + SSL/HTTPS Management)
-*   **The Goal:** Master multi-tenant reverse proxy routing, SSL termination, and programmatic whitelabeling using Nginx.
-*   **Production Challenge:** Routing B2B customers who map their custom domains (e.g., `://client.com`) to your server infrastructure, while enforcing dynamic routing, CORS policies, and local HTTPS certificate resolution.
+### 8. Multi-Tenant Whitelabel Gateway & Custom Domains (Nginx + TLS/ACME)
+*   **The Goal:** Master Nginx as the front door of a backend — TLS termination, reverse proxying, load balancing, caching and rate limiting — and build a multi-tenant Node gateway that routes by `Host`, automating TLS certificates for customer domains the way production SaaS platforms do.
+*   **Production Challenge:** A whitelabel SaaS serves each customer on a subdomain (`acme.platform.local`) or their own domain (`shop.acme.local`), each with its own branding, CORS policy and backend — and new custom domains must get valid HTTPS automatically, with no manual certificate work and no Nginx reloads.
 *   **Tech Stack & Libraries:**
-    *   *Core Engine:* Nginx (Reverse proxy), Node.js native `http`, `https`, and `tls` modules.
-    *   *Tools:* `mkcert` (Local trusted SSL certificate tool via Homebrew) or OpenSSL.
+    *   *Infrastructure:* Nginx, Pebble (Let's Encrypt's official local ACME test server), `mkcert`, PostgreSQL (tenant registry) — all via Docker Compose.
+    *   *Node Libraries:* native `http` / `https`, `acme-client`, `pg`, `zod`.
 *   **Local Setup & Simulation Plan:**
-    *   Configure Nginx as a reverse proxy fronting a dynamic Node.js gateway application using local dummy domain configurations in your `/etc/hosts` file (e.g., `tenant-a.local`, `tenant-b.local`).
-    *   Use `mkcert` to issue wildcard local SSL certificates to verify seamless HTTPS handshakes through Nginx.
-    *   Your Node application inspects incoming `Host` headers to verify valid custom domains, applying whitelabel routing parameters dynamically and altering headers before completing responses.
+    *   Map tenant domains in `/etc/hosts`, issue a wildcard `*.platform.local` certificate with `mkcert`, and run two Node gateway replicas plus two tiny backend apps behind Nginx.
+    *   **Nginx essentials:** TLS termination with HTTP→HTTPS redirect and HTTP/2; an `upstream` balancing across the gateway replicas with failover; correct `X-Forwarded-*` headers; gzip, `proxy_cache` and `limit_req` rate limiting; WebSocket upgrade pass-through; timeouts.
+    *   **Node gateway:** resolve the tenant from `Host` (unknown hosts are rejected) and load its config; proxy to the tenant's backend with a hand-written proxy — streamed bodies via `pipeline()`, hop-by-hop headers stripped, `X-Forwarded-For` trusted only from Nginx, tenant headers injected — and answer CORS preflights from each tenant's allowed origins.
+    *   **Custom domains:** a tenant registers `shop.acme.local`; the gateway orders a certificate from Pebble over ACME HTTP-01 with `acme-client` (the challenge served through Nginx) and writes it to a shared volume, where Nginx loads it per handshake via `ssl_certificate $ssl_server_name` — no reload. A renewal job replaces certificates before they expire.
 
-### 7. Secure Identity Provider & RBAC (Apache Cassandra NoSQL + Token Rotation)
-*   **The Goal:** Master stateless token authorization, asymmetric cryptography, deep session control, and hierarchical Role-Based Access Control (RBAC) schemas mapped to an ultra-high-scale wide-column database — query-first modelling, partition and clustering key design, denormalization instead of joins, and tunable consistency.
-*   **Production Challenge:** Designing a distributed authentication server that processes millions of token validations, permission evaluations, and linear session footprints at immense scale without structural single points of data failure.
+### 9. Identity Provider with Token Rotation & RBAC (Apache Cassandra + JWT)
+*   **The Goal:** Master auth essentials — password hashing, asymmetric JWTs with a JWKS endpoint and key rotation, rotating refresh tokens with reuse detection, and role-based access control — on top of Cassandra: query-first modelling, partition and clustering keys, denormalization, TTLs, lightweight transactions and tunable consistency.
+*   **Production Challenge:** Many services must verify tokens without calling the identity server on every request, a stolen refresh token must be detected and its whole session revoked at once, and keys, roles and sessions must stay correct across a distributed database where nodes can be down.
 *   **Tech Stack & Libraries:**
-    *   *Core Engine & DB:* Apache Cassandra (Wide-column NoSQL database).
-    *   *Node Libraries:* `cassandra-driver`, `jsonwebtoken`, `bcrypt`, Node's native `crypto` module.
+    *   *Database:* Apache Cassandra (a 3-node cluster with small heaps).
+    *   *Node Libraries:* `cassandra-driver`, `jsonwebtoken`, `bcrypt`, native `crypto`, `fastify`, `zod`.
 *   **Local Setup & Simulation Plan:**
-    *   Run a single-node Apache Cassandra instance via Docker. Define a keyspace optimized to store user token histories alongside deeply nested corporate role and permission mappings — designing the tables around the queries you intend to run, since Cassandra will not join for you.
-    *   Use Node's native `crypto` module to generate RSA public/private key pairs locally to handle cryptographic token signatures.
-    *   Expose endpoints that evaluate dynamic middleware permissions (e.g., Admin vs Manager) against the wide-column Cassandra lookups. Write integration tests simulating token theft: if a user submits an older refresh token twice, your system must trigger an automatic security hook, invalidating all related tokens in that family branch within Cassandra immediately.
+    *   **Data model:** run a 3-node Cassandra cluster via Docker with a keyspace at replication factor 3. Design one table per query (`users_by_email`, `refresh_tokens_by_id`, `sessions_by_user`, `roles_by_user_and_org`), denormalize instead of joining, and expire tokens with TTLs instead of deletes to avoid tombstones.
+    *   **Access tokens:** generate RSA key pairs with `crypto`, sign 15-minute access tokens tagged with a `kid`, publish `/.well-known/jwks.json`, and rotate keys — the new key signs while the old one stays published until its tokens expire. A small separate resource API verifies tokens from the cached JWKS alone, never calling the identity server.
+    *   **Refresh rotation & reuse detection:** refresh tokens are opaque and stored hashed. Each use issues a new token in the same family and marks the old one used with a lightweight transaction (`UPDATE ... IF used = false`); presenting a used token revokes the whole family. Integration tests simulate the theft, plus "log out everywhere".
+    *   **RBAC:** roles per organization (admin in one, viewer in another) mapped to permissions, enforced by a `requirePermission('orders:write')` middleware. Compare permissions embedded in the token vs looked up per request — fast, but stale until the token expires.
+    *   **Consistency:** compare `ONE` vs `QUORUM` for writes and reads, kill a node to see which operations still succeed, and reason about why revocation checks need `QUORUM`.
 
----
-
-# Phase 3: Real-Time Systems, AI, & Infrastructure
-
-### 8. AI Document Assistant — RAG Over Your Own Documents (pgvector + WebSockets)
-*   **The Goal:** Master LLM application engineering end to end — chunking, embeddings, vector retrieval, grounded generation, tool calling, streaming transport, and measuring whether any of it actually works.
-*   **Production Challenge:** AI features fail in ways ordinary backends don't: retrieval returns confident nonsense, token costs run away silently, providers rate-limit you mid-stream, and there is no obvious test that tells you whether a change made the system better or worse.
+### 10. AI Document Assistant — RAG Over Your Own Documents (Ollama + pgvector + WebSockets)
+*   **The Goal:** Master the core of LLM application engineering — chunking and embeddings, vector search, grounded answers with citations, a hand-run tool-use loop, streaming over WebSockets, and measuring whether a change actually made answers better.
+*   **Production Challenge:** LLM features fail in ways ordinary backends don't: retrieval returns confident nonsense, the model invents answers its sources don't support, a user closes the tab while tokens keep generating, and no ordinary test tells you whether a change improved the system or made it worse.
 *   **Tech Stack & Libraries:**
-    *   *Model & Vector Store:* Anthropic Claude API (or a local model via Ollama), PostgreSQL with the **pgvector** extension.
-    *   *Node Libraries:* `@anthropic-ai/sdk`, `pg` with `pgvector`, `ws` (WebSocket token streaming), `fastify`, `zod`.
+    *   *Model & Vector Store:* Ollama (a local open model with tool calling for chat, `nomic-embed-text` for embeddings), PostgreSQL with the **pgvector** extension.
+    *   *Node Libraries:* `openai` (the standard SDK, pointed at Ollama's OpenAI-compatible API), `pg`, `ws`, `fastify`, `zod`.
 *   **Local Setup & Simulation Plan:**
-    *   Run a `pgvector` container. Build the ingest pipeline: upload a document → split into overlapping chunks → embed each chunk → store the vector alongside its source metadata. Add an HNSW index and compare its recall and latency against an exact scan to understand what approximate search actually costs you.
-    *   **Retrieval:** expose a query endpoint that embeds the question, pulls the top-K chunks, and builds a grounded prompt forcing the model to cite its sources — and to answer "I don't know" when retrieval comes back empty.
-    *   **Streaming:** push tokens to the browser over **WebSockets** as they generate (deliberately not SSE — Project 2 already covered that), including mid-stream cancellation when the client disconnects.
-    *   **Tool calling:** give the model a small set of real tools (a document search, a date lookup) and run the tool-use loop yourself rather than deferring it to a framework, so you understand the protocol.
-    *   **Guardrails & evals:** enforce a per-conversation token budget, handle `429` rate limits with backoff, and write an **eval harness** — a fixture set of questions with known-correct source chunks, scored on retrieval hit rate — so you can prove a chunking or top-K change actually helped.
-
-### 9. Cloud-Native Deployment Foundation & GitOps Pipeline (Kubernetes + Helm + Terraform + GitHub Actions)
-*   **The Goal:** Master the core fundamentals of declarative Infrastructure as Code (IaC), container orchestration, template packaging, and automated Continuous Integration (CI) workflows.
-*   **Production Challenge:** Eliminating manual infrastructure provisioning, cleanly injecting configuration secrets into distributed environments, ensuring isolated network communication between services, and building automated quality gates that safely test and package container images before deployment.
-*   **Tech Stack & Tools:**
-    *   *CI/CD Pipeline:* GitHub Actions, GitHub Container Registry (`ghcr.io`).
-    *   *Orchestration & IaC:* Terraform (using local `kubernetes` and `helm` providers), Kubernetes (via local Minikube or Docker Desktop), Helm (Kubernetes package manager).
-    *   *App Components:* Two minimal Node.js services (one gateway API, one background service) to act as the deployment assets.
-*   **Local Setup & Simulation Plan:**
-    *   **The GitHub Actions Gate:** Write a lean GitHub Actions workflow that automatically triggers on a git push. It executes basic linting/testing and, upon success, builds your application into a Docker image and pushes it securely to GitHub's built-in container registry.
-    *   **The Terraform Infrastructure Setup:** Use **Terraform** locally *strictly* to manage your local cluster boundaries. Write configurations to declaratively spin up a dedicated Kubernetes namespace and configure cluster-wide environment variables without touching an external cloud account.
-    *   **The Helm Packaging Phase:** Package your services into a custom **Helm Chart**. Define a fixed replication boundary (e.g., run exactly 2 pods for high availability), set explicit CPU/Memory resource constraints, and write native Kubernetes liveness and readiness health probes that point to your Node.js endpoints.
-    *   **The Self-Healing Simulation:** Deploy your services onto your local Kubernetes cluster using your custom Helm chart. Open your terminal and manually "kill" a running pod using `kubectl delete pod`. Observe the cluster dashboard to watch Kubernetes instantly auto-heal by spinning up a fresh, configured replacement replica to maintain your system state.
-
-### 10. Uber-Style Real-Time Delivery Matcher & Geo-Analytics Engine (PostgreSQL Deep Dive + PostGIS)
-*   **The Goal:** Master PostgreSQL properly — index types and when each one applies, reading `EXPLAIN ANALYZE`, query planning, window functions and CTEs, partitioning, and transaction isolation levels — using specialized geospatial indexing (`GiST`) and high-performance spatial queries as the domain demanding enough to force the lesson.
-*   **Production Challenge:** Safely storing massive histories of trips, calculating complex location-based matches (e.g., finding the 5 closest available drivers to a passenger instantly), and identifying high-demand areas (Surge Pricing zones) without destroying database CPU performance.
-*   **Tech Stack & Libraries:**
-    *   *Database:* PostgreSQL with the **PostGIS** extension enabled.
-    *   *Node Libraries:* `pg` (Official Postgres client), `fastify`.
-    *   *System Tool:* Docker (using the `postgis/postgis` image).
-*   **Local Setup & Simulation Plan:**
-    *   Spin up a PostGIS container via Docker. Seed the database with a clean relational schema: `drivers` (with current coordinates), `passengers`, and `rides` (storing start/end pickup geometry paths).
-    *   **Geospatial Indexing:** Map latitude and longitude fields into official PostGIS geography points and bind a **GiST (Generalized Search Tree)** index to that column. Compare B-tree, GiST and GIN on the same data to learn which structure suits which query shape, verifying every choice with `EXPLAIN ANALYZE` rather than assumption.
-    *   **The Uber-Style Match:** Expose an HTTP endpoint where a passenger requests a ride. Your Node app executes an optimized SQL query using `ST_DWithin` and the `<->` KNN distance operator to instantly find and lock the nearest 5 available drivers sorted by physical proximity within milliseconds — and you explore how `SELECT ... FOR UPDATE SKIP LOCKED` and the isolation level prevent two passengers claiming the same driver.
-    *   **Dynamic Surge Analytics:** Store high-demand polygon shapes (e.g., concert venues or downtown grid coordinates) as `GEOMETRY` zones. Write a query using `ST_Contains` to detect if a passenger's pickup location falls inside a high-demand zone to dynamically apply a pricing multiplier, using window functions and CTEs to rank zones by live demand.
-    *   Partition the `rides` history table by month and watch the planner prune partitions away. Then use `k6` to blast hundreds of concurrent driver location coordinate updates (`PING` updates) per second into the server, verifying that the database cleanly indexes the moving coordinates while serving passenger match requests without lag.
+    *   **Ingest:** run Ollama and pgvector via Docker. Upload Markdown or text documents, split them into overlapping chunks, embed each chunk, and store the vector with its source and position. Add an HNSW index and confirm with `EXPLAIN` that it is used.
+    *   **Tool-use loop:** give the model a single `search_documents` tool that embeds the query and returns the top-K chunks, and run the loop yourself with no framework — send the conversation, execute tool calls, return results, repeat until the model answers. The system prompt requires citing chunk IDs and answering "I don't know" when the search finds nothing relevant.
+    *   **Streaming:** push tokens to a simple browser chat over **WebSockets** as they generate; when the user hits "stop" or disconnects, abort the model request with an `AbortController` so generation stops server-side too.
+    *   **Evals:** a fixture of ~20 questions, each tagged with the chunk that answers it, scored on retrieval hit rate@K. Change chunk size or K and prove with numbers whether retrieval got better.
